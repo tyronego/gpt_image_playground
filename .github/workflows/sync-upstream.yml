@@ -1,0 +1,29 @@
+name: Sync Fork Upstream
+on:
+  # 定时同步 UTC时间，下面示例：每天凌晨4点（国内中午12点）
+  schedule:
+    - cron: "0 4 * * *"
+  # 允许手动点按钮立即执行
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Git config
+        run: |
+          git config --global user.name "Sync Bot"
+          git config --global user.email "sync@github.com"
+      - name: Sync upstream
+        run: |
+          # ===========这里改成【原始上游仓库地址】==========
+          git remote add upstream https://github.com/CookSleep/gpt_image_playground.git
+          git fetch upstream
+          git checkout main
+          git merge upstream/main --allow-unrelated-histories || true
+          # 推送到你的fork仓库，触发Vercel
+          git push origin main
