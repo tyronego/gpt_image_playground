@@ -1,15 +1,29 @@
 name: Sync Fork Upstream
+
 on:
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 4 * * *"          # 每天 04:00 UTC（北京时间 12:00）
   workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: "即使上游没有新提交，也强制触发一次 Vercel 重建"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write                # 需要写权限才能把 merge 结果推回 fork
+
+# 同一时间只跑一个，避免两次定时任务打架
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5  # 升级v5，消除Node20警告
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -20,26 +34,58 @@ jobs:
           git config --global user.email "sync-bot@github.com"
 
       - name: Sync upstream repository
+        id: sync
         run: |
           # ==================== 修改这里！！====================
           UPSTREAM_REPO="CookSleep/gpt_image_playground"
           TARGET_BRANCH="main" # 如果源码分支是master，改成 master
           # =====================================================
-          
+
+          BEFORE="$(git rev-parse HEAD)"
+
           git remote remove upstream || true
-          git remote add upstream https://github.com/${UPSTREAM_REPO}.git
-          git fetch upstream
-          
-          # 切换分支
-          git checkout ${TARGET_BRANCH}
-          
-          # 优先策略：合并；冲突则放弃本地改动，完全跟随上游（避免卡死128）
-          if git merge upstream/${TARGET_BRANCH}; then
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream --prune
+
+          git checkout "${TARGET_BRANCH}"
+
+          # 优先策略：合并；冲突则放弃本地改动，完全跟随上游（避免卡死）
+          # ⚠️ 如果你在 fork 上放了自己的改动，这里的 reset --hard 会把它丢掉
+          if git merge --no-edit "upstream/${TARGET_BRANCH}"; then
             echo "Merge success"
           else
-            echo "Merge conflict, force reset to upstream"
-            git reset --hard upstream/${TARGET_BRANCH}
+            echo "::warning::Merge conflict → reset --hard upstream（本地改动会被丢弃）"
+            git reset --hard "upstream/${TARGET_BRANCH}"
           fi
 
-          # 推送回自己fork仓库，触发Vercel部署
-          git push origin ${TARGET_BRANCH} --force-with-lease
+          AFTER="$(git rev-parse HEAD)"
+          echo "before=${BEFORE}" >> "$GITHUB_OUTPUT"
+          echo "after=${AFTER}"  >> "$GITHUB_OUTPUT"
+
+          if [ "${BEFORE}" = "${AFTER}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "上游没有新提交，跳过推送"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git push origin "${TARGET_BRANCH}" --force-with-lease
+          fi
+
+      - name: Trigger Vercel rebuild
+        # 有更新才触发；手动运行时可勾 force_deploy 强制触发
+        if: ${{ steps.sync.outputs.changed == 'true' || inputs.force_deploy }}
+        env:
+          # 优先用仓库 secret；没配就回落到写死的 hook URL
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK || 'https://api.vercel.com/v1/integrations/deploy/prj_MW13ggeFIlsSLiawOx8ysLQL7V2E/PIFA18OztY' }}
+        run: |
+          echo "changed=${{ steps.sync.outputs.changed }} / force=${{ inputs.force_deploy }}"
+          echo "上游旧版本: ${{ steps.sync.outputs.before }}"
+          echo "同步后版本: ${{ steps.sync.outputs.after }}"
+          code=$(curl -sS -o /tmp/vercel.json -w '%{http_code}' \
+                    -X POST "$HOOK" -H 'Content-Type: application/json' -d '{}')
+          echo "HTTP $code"
+          cat /tmp/vercel.json || true
+          echo
+          case "$code" in
+            200|201|202) echo "✅ Vercel 重建已触发" ;;
+            *) echo "::error::Vercel deploy hook 返回 $code"; exit 1 ;;
+          esac
