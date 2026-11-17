@@ -74,9 +74,15 @@ jobs:
         # 有更新才触发；手动运行时可勾 force_deploy 强制触发
         if: ${{ steps.sync.outputs.changed == 'true' || inputs.force_deploy }}
         env:
-          # 优先用仓库 secret；没配就回落到写死的 hook URL
-          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK || 'https://api.vercel.com/v1/integrations/deploy/prj_MW13ggeFIlsSLiawOx8ysLQL7V2E/PIFA18OztY' }}
+          # 只从仓库 secret 读取（Settings → Secrets and variables → Actions）
+          # ⛔ 不要把 deploy hook URL 写成明文：本仓库是 public，写进去等于公开
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }}
         run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::仓库 secret VERCEL_DEPLOY_HOOK 未配置，无法触发 Vercel 重建"
+            echo "　　去 Settings → Secrets and variables → Actions → New repository secret 添加"
+            exit 1
+          fi
           echo "changed=${{ steps.sync.outputs.changed }} / force=${{ inputs.force_deploy }}"
           echo "上游旧版本: ${{ steps.sync.outputs.before }}"
           echo "同步后版本: ${{ steps.sync.outputs.after }}"
